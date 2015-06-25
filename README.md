@@ -1,1 +1,3 @@
 # blog_python
+
+THIS IS FIRST PYTHON PROJECT FOR ME`
