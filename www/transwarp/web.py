@@ -886,4 +886,28 @@ class Request(object):
 	@property
 	def cookies(self):
 		'''
-		Return all cook
+		Return all cookies as dict. The cookie name is str and values is unicode.
+
+		>>> r = Request({'HTTP_COOKE':'A=123; url=http%3A%2F%2Fwww.example.com%2F'})
+		>>> r.cookies['A']
+		u'123'
+		>>> r.cookies['url']
+		u'http://www.example.com/'
+		'''
+		return Dict(**self._get_cookies())
+
+	def cookie(self, name, default=None):
+		'''
+		Return specified cookie value as unicode. Default to None if cookie not exists.
+
+		>>> r = Request({'HTTP_COOKIE':'A=123; url=http%3A%2F%2Fwww.example.com%2F'})
+		>>> r.cookie('A')
+		u'123'
+		>>> r.cookie('url')
+		u'http://www.example.com/'
+		>>> r.cookie('test')
+		>>> r.cookie('test', u'DEFAULT')
+		u'DEFAULT'
+		'''
+		return self._get_cookies().get(name, default)
+		
