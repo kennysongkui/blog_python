@@ -911,3 +911,140 @@ class Request(object):
 		'''
 		return self._get_cookies().get(name, default)
 		
+UTC_0 = UTC('+00:00')
+
+class Response(object):
+	
+	def __init__(self):
+		self._status = '200 OK'
+		self._headers = {'CONTENT-TYPE': 'text/html; charset=utf-8'}
+	
+	@property
+	def headers(self):
+		'''
+		Return response headers as [(key1, value1), (key2, value2)...] including cookies.
+
+		>>> r = Response()
+		>>> r.headers
+		[('Content-Type', 'text/html; charset=utf-8'), ('X-Powered-By', 'transwarp/1.0')]
+		>>> r.set_cookie('s1', 'ok', 3600)
+		>>> r.headers
+		[('Content-Type', 'text/html; charset=utf-8'), ('Set-Cookie', 's1=ok; Max-Age=3600; Path=/; HttpOnly'), ('X-Powered-By', 'transwarp/1.0')]
+		'''
+		L = [(_RESPONSE_HEADER_DICT.get(k, k), v) for k, v in self._headers.iteritems()]
+		if hasattr(self, '_cookies'):
+			for v in self._cookies.iteritems():
+				L.append(('Set-Cookie', v))
+		L.append(_HEADER_X_POWERED_BY)
+		return L
+
+	def header(self, name):
+		'''
+		Get header by name, case-insensitive.
+
+		>>> r = Response()
+		>>> r.header('content-type')
+		'text/html; charset=utf-8'
+		>>> r.header('CONTENT-type')
+		'text/html; charset=utf-8'
+		>>> r.header('X-Powered-By')
+		'''
+		key = name.upper()
+		if not key in _RESPONSE_HEADER_DICT:
+			key = name
+		return self._headers.get(key)
+
+	def unset_header(self, name):
+		'''
+		Unset header by name and value.
+
+		>>> r = Response()
+		>>> r.header('content_type')
+		'text/html; charset=utf-8'
+		>>> r.unset_header('CONTENT-type')
+		>>> r.header('content_type')
+		'''
+		key = name.upper()
+		if not key in _RESPONSE_HEADER_DICT:
+			key = name
+		if key in self._headers:
+			del self._headers[key]
+
+	def set_header(self, name, value):
+		'''
+		Set header by name and value.
+
+		>>> r = Response()
+		>>> r.header('content-type')
+		'text/html; charset=utf-8'
+		>>> r.set_header('CONTENT-type', 'image/png')
+		>>> r.header('content-TYPE')
+		'image/png'
+		'''
+		key = name.upper()
+		if not key in _RESPONSE_HEADER_DICT:
+			key = name
+		self._headers[key] = _to_str(value)
+
+	@property
+	def content_type(self):
+		'''
+		Get content type from response. This is a shortcut for header('Content-Type').
+
+		>>> r = Response()
+		>>> r.content_type
+		'text/html; charset=utf-8'
+		>>> r.content_type = 'application/json'
+		>>> r.content_type
+		'application/json'
+		'''
+		return self.header('CONTENT-TYPE')
+
+	@content_type.setter
+	def content_type(self, value):
+		'''
+		Set content type for response. This is a shortcut for set_header('Content-Type', value).
+		'''
+		if value:
+			self.set_header('CONTENT-TYPE', value)
+		else:
+			self.unset_header('CONTENT-TYPE')
+
+	@property
+	def content_length(self):
+		'''
+		Get content length. Return None if not set.
+
+		>>> r = Response()
+		>>> r.content_length
+		>>> r.content_length = 100
+		>>> r.content_length
+		'100'
+		'''
+		return self.header('CONTENT-LENGTH')
+
+	@content_length.setter
+	def content_length(self, value):
+		'''
+		Set content length, the value can be int or str.
+
+		>>> r = Response()
+		>>> r.content_length = '1024'
+		>>> r.content_length
+		'1024'
+		>>> r.content_length = 1024 * 8
+		>>> r.content_length
+		'8192'
+		'''
+		self.set_header('CONTENT-LENGTH', str(value))
+
+	def delete_cookie(self, name):
+		'''
+		Delete a cookie immediately.
+
+		Args:
+			name: the cookie name.
+		'''
+		self.set_cookie(name, '__deleted__', expires=0)
+		
+
