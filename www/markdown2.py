@@ -83,3 +83,114 @@ see <https://github.com/trentm/python-markdown2/wiki/Extras> for details):
 #	and 'perldoc perlre'.
 
 __version_info__ = (2, 1, 0)
+__version__ = '.'.join(map(str, __version_info__))
+__author__ = "Trent Mick"
+
+import os
+import sys
+from pprint import pprint
+import re
+import logging
+try:
+	from hashlib import md5
+except ImportError:
+	from md5 import md5
+import optparse
+from random import random, randint
+import codecs
+
+
+#--- Python version compat
+
+try:
+	from urllib.parse import quota # python3
+except ImportError:
+	from urllib import quote # python2
+
+if sys.version_info[:2] < (2,4):
+	from sets import Set as set
+	def reversed(sequence):
+		for i in sequence[::1]:
+			yield i
+
+# Use `bytes` for byte strings and `unicode` for unicode strings (str in Py3).
+if sys.version_info[0] <= 2:
+	py3 = False
+	try:
+		bytes
+	except NameError:
+		bytes = str`
+	base_string_type = basestring
+elif sys.version_info[0] >= 3:
+	py3 = True
+	unicode = str
+	base_string_type = str
+
+
+
+#---- globals
+
+DEBUG = False
+log = logging.getLogger("markdown")
+
+DEFAULT_TAB_WIDTH = 4
+
+
+SECRET_SALT = bytes(randint(0, 100000))
+def _hash_text(s):
+	return 'md5-' + md5(SECRET_SALT + s.encode("utf-8")).hexdigest()
+
+# Table of hash values for escaped characters:
+g_escape_table = dict([(ch, _hash_text(ch))
+	for ch in '\\`*_{}[]()>#+-.!'])
+
+
+
+#---- exceptions
+
+class MarkdownError(Exception):
+	pass
+
+
+
+#---- public api
+
+def markdown_path(path, encoding="utf-8", 
+				html4tags=False, tab_width=DEFAULT_TAB_WIDTH, 
+				safe_mode=None, extras=None, link_patterns=None, 
+				use_file_vars=False`):
+	fp = codecs.open(path, 'r', encoding)
+	text = fp.read()
+	fp.close()
+	return Markdown(html4tags=html4tags, tab_width=tab_width, 
+					safe_mode=safe_mode, extras=extras, 
+					link_patterns=link_patterns,
+					use_file_vars=use_file_vars).convert(text)
+
+def markdown(text, html4tags=False, tab_width=DEFAULT_TAB_WIDTH, 
+			safe_mode=None, extras=None, link_patterns=None, 
+			use_file_vars=False):
+	return Markdown(html4tags=html4tags, tab_width=tab_width, 
+					safe_mode=safe_mode, extras=extras, 
+					link_patterns=link_patterns, 
+					use_file_vars=use_file_vars).convert(text)
+
+class Markdown(object):
+	# The dict of "extras" to enable in processing -- a mapping of
+	# extra name to argument for the extra. Most extras do not have an
+	# argument, in which case the value is None.
+	#
+	# This can be set via (a) subclassing and (b) the constructor
+	# "extras" argument.
+	extras = None
+
+	urls = None
+	titles = None
+	html_blocks = None
+	html_spans = None
+	html_removed_text = "[HTML_REMOVED]" # for compat with markdown.py
+	
+	def __init__(self, arg):
+		super(Markdown, self).__init__()
+		self.arg = arg
+		
