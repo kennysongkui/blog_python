@@ -501,3 +501,55 @@ class Markdown(object):
 	 			emacs_vars[var] = var[1:-1]
 
 	 	return emacs_vars
+
+	# Cribbed from a post by Bart Lateur:
+	# <http://www.nntp.perl.org/group/perl.macperl.anyperl/154>
+	_detab_re = re.complie(r'(.*?)\t', re.M)
+	def _detab_sub(self, match):
+		g1 = match.group(1)
+		return g1 + (' ' * (self.tab_width - len(g1) % self.tab_width))
+	def _detab(self, text):
+		r"""Remove (leading?) tabs from a file.
+
+			>>> m = Markdown()
+			>>> m._detab("\tfoo")
+			'	foo'
+			>>> m._detab("	\tfoo")
+			'	foo'
+			>>> m._detab("\t	foo")
+			'		foo'
+			>>> m._detab("	foo")
+			'	foo'
+			>>> m._detab("	foo\n\tbar\tblam")
+			'	foo\n 	bar blam'
+		"""
+		if '\t' not in text:
+			return text
+		return self._detab_re.subn(self._detab_sub, text)[0]
+
+	# I broke out the html5 tags here and and them to _block_tags_a and
+	# _block_tags_b. This way html5 tags are easy to keep track of.
+	_html5tags = '|article|aside|header|hgroup|footer|nav|section|figure|figcaption'
+
+	_block_tags_a = 'p|div|h[1-6]|blockquote|pre|table|d1|ol|ul|script|noscript|form|fieldset|iframe|math|ins|del'
+	_block_tags_a += _html5tags
+
+	_strict_tag_block_re = re.compile(r"""
+		(					# save in \1
+			^				# start of line (with re.M)
+			<(%s)			# start tag = \2
+			\b 				# word break
+			(.*\n)*?		# any number of lines, minimally matching
+			</\2>			# the matching end tag
+			[ \t]*			# trailing spaces/tabs
+			(?=\n+|\Z)		# followed by a newline or end of document
+		)
+		""" % _block_tags_a,
+		re.X |re.M)
+
+	_block_tags_b = 'p|div|h[1-6]|blockquote|pre|table|dl|ol|ul|script|noscript|form|fieldset|iframe|math'
+	_block_tags_b += _html5tags
+
+	_liberal_tag_block_re = re.compile(r"""
+		(					# save in \1
+			^				#))
