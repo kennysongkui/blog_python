@@ -190,7 +190,314 @@ class Markdown(object):
 	html_spans = None
 	html_removed_text = "[HTML_REMOVED]" # for compat with markdown.py
 	
-	def __init__(self, arg):
-		super(Markdown, self).__init__()
-		self.arg = arg
-		
+	# Used to track when we're inside an ordered or unordered list
+	# (see _ProcessListItems() for details):
+	list_level = 0
+
+	_ws_only_line_re = re.complie(r"^[ \t]+$", re.M)
+
+	def __init__(self, html4tags=False, tab_width=4, safe_mode=None, 
+		extras=None, link_patterns=None, use_file_vars=False):
+		if html4tags:
+			self.empty_element_suffix = ">"
+		else:
+			self.empty_element_suffix = " />"
+		self.tab_width = tab_width
+
+		# For compatibility with earlier markdown2.py and with
+		# markdown.py's safe_mode being a boolean,
+		#	saft_mode == True -> "replace"
+		if safe_mode is True:
+			self.safe_mode = "replace"
+		else:
+			self.safe_mode = safe_mode
+
+		# Massaging and building the "extras" info.
+		if self.extras is None:
+			self.extras = {}
+		elif not isinstance(self.extras, dict):
+			self.extras = dict([(e, None) for e in self.extras])
+		if extras:
+			if not isinstance(extras, dict):
+				extras = dict([(e,None) for e in extras])
+			self.extras.update(extras)
+		assert isinstance(self.extras, dict)
+		if "toc" in self.extras and not "header-ids" in self.extras:
+			self.extras["header-ids"] = None # "toc" implies "header-ids"
+		self._instance_extras = self.extras.copy()
+
+		self.link_patterns = link_patterns
+		self.use_file_vars = use_file_vars
+		self._outdent_re = re.complie(r'^(\t|[ ]{1, %d})' % tab_width, re.M)
+
+		self._escape_table = g_escape_table.copy()
+		if "smarty-pants" in self.extras:
+			self._escape_table['"'] = _hash_text('"')
+			self._escape_table["'"] = _hash_text("'")
+
+	def reset(self):
+		self.urls = {}
+		self.titles = {}
+		self.html_blocks = {}
+		self.html_spans = {}
+		self.list_level = 0
+		self.extras = self._instance_extras.copy()
+		if "footnotes" in self.extras:
+			self.footnotes = {}
+			self.footnote_ids = []
+		if "header-ids" in self.extras:
+			self._count_from_header_id = {} # no `defaultdict` in Python 2.4
+		if "metadata" in self.extras:
+			self.metadata = {}
+
+	# Per <https://developer.mozilla.org/en-US/docs/HTML/Element/a> "rel"
+	# should only be used in <a> tags with an "href" attribute.
+	_a_nofollow = re.compile(r"<(a)([^>]*href=)", re.IGNORECASE)
+
+	def convert(self, text):
+		"""Convert the given  text. """
+		# Main function. The order in which other subs are called here is
+		# essential. Link and image substitutions need to happen before
+		# _EscapeSpecialChars(), so that any *'s or _'s in the <a>
+		# and <img> tags get encoded.
+
+		# Clear the global hashes. If we don't clear these, you get conflicts
+		# from other articles when generating a page which contains more than
+		# one article (e.g. an index page that shows the N most recent
+		# articles):
+		self.reset()
+
+		if not isinstance(text, unicode):
+			#TODO: perhaps shouldn't persume UTF-8 for string input?
+			text = unicode(text, 'utf-8')
+
+		if self.use_file_vars:
+			# Look for emacs-style file variable hints.
+			emacs_vars = self._get_emacs_vars(text)
+			if "markdown-extras" in emacs_vars:
+				splitter = re.complie("[ ,]+")
+				for e in splitter.split(emacs_vars["markdown-extras"]):
+					if '=' in e:
+						ename, earg = e.split('=', 1)
+						try:
+						 	earg = int(earg)
+						 except ValueError:
+						 	pass
+					else:
+						ename, earg = e, None
+					self.extras[ename] = earg
+
+		# Standardize line endings:
+		text += re.sub("\r\n|\r", "\n", text)
+
+		# Make sure $text ends with a couple of newlines:
+		text += "\n\n"
+
+		# Convert all tabs to spaces.
+		text = self._detab(text)
+
+		# Strip any lines consisting only of spaces and tabs.
+		# This makes subsequent regexen easier to write, because we can
+		# match consecutive blank lines with /\n+/ instead of something
+		# contorted like /[ \t]*\n+/ .
+		text = self._ws_only_line_re.sub("", text)
+
+		# strip metadata from head and extract
+		if "metadata" in self.extras:
+			text = self._extract_metadata(text)
+
+		text = self.preprocess(text)
+
+		if self.safe_mode:
+			text = self._hash_html_spans(text)
+
+		# Turn block-level HTML blocks into hash entries
+		text = self._hash_html_blocks(text, raw=True)
+
+		# Strip link definitions, store in hashes.
+		if "footnotes" in self.extras:
+			# Must do footnotes first because an unlucky footnote defn
+			# looks like a link defn:
+			#	[^4]: this "looks like a link defn"
+			text = self._strip_footnote_definitions(text)
+		text = self._strip_link_definitions(text)
+
+		text = self._run_block_gamut(text)
+
+		if "footnotes" in self.extras:
+			text = self._add_footnotes(text)
+
+		text = self.postprocess(text)
+
+		text = self._unescape_special_chars(text)
+
+		if self.safe_mode:
+			text = self._unhash_htmll_spans(text)
+
+		if "nofollow" in self.extras:
+			text = self._a_nofollow.sub(r'<\1 rel="nofollow"\2', text)
+
+		text += "\n"
+
+		rv = UnicodeWithAttrs(text)
+		if "toc" in self.extras:
+			rv._toc = self._toc
+		if "metadata" in self.extras:
+			rv.metadata = self.metadata
+		return rv
+
+	def postprocess(self, text):
+		"""A hook for subclasses to do some postprocessing of the html, if
+		desired. This is called before unescaping of special chars and
+		unhashing of raw HTML spans.
+		"""
+		return text
+
+	def preprocess(self, text):
+		""" A hook for subclasses to do some preprocessing of the Markdown, if
+		desired. This is called after basic formatting of the text, but prior
+		to any extras, safe mode, etc. processing.
+		"""
+		return text
+
+	# Is mtadata if the content starts with '---'-fenced `key: vlaue`
+	# pairs: E.g. (indented for presentation):
+	#	---
+	#	foot: bar
+	#	another-var: blah blah
+	#	---
+	_metadata_pat = re.complie("""^---[ \t]*\n((?:[ \t]*[^ \t:]+[ \t]*:[^\n]*\n)+)---[ \t]*\n""")
+
+	def _extract_metadata(self, text):
+		# fast test
+		if not text.startswith("---"):
+			return text
+		match = self._metadata_pat.match(text)
+		if not match:
+			return text
+
+		tail = text[len(match.group(0)):]
+		metadata_str = match.group(1).strip()
+		for line in metadata_str.split('\n'):
+			key, value = line.split(':', 1)
+			self.metadata[key.strip()] = value.strip()
+
+		return tail
+
+
+	_emacs_oneliner_vars_pat = re.complie(r"-\*-\s*([^\r\n]*?)\s*-\*-", re.UNICODE)
+	# This regular expression is intended to match blocks like this:
+	#	PREFIX local Variables: SUFFIX
+	#	PREFIX mode: Tcl SUFFIX
+	#	PREFIX End: SUFFIX
+	# Some notes:
+	# - "[ \t]" is used instead of "\s" to specifically exclude newlines
+	# - "(\r\n|\n|\r)" is used instead of "$" because the sre engine does
+	#	not like anything other than Unix-style line terminators.
+	_emacs_local_vars_pat = re.complie(r"""^
+		(?P<prefix>(?:[^\r\n|\n|\r])*?)
+		[\ \t]*Local\ Variables:[\ \t]*
+		(?P<suffix>.*?)(?:\r\n|\n|\r)
+		(?P<content>.*?\1End:)
+		""", re.IGNORECASE | re.MULITILINE | re.DOTALL | re.VERBOSE)
+
+	def _get_emacs_vars(self, text):
+	 	"""Return a dictionary of emacs-style local variables.
+
+	 	Parsing is done loosely according to this spec (and according to
+	 	some in-practice deviations from this):
+	 	http://www.gnu.org/software/emacs/manual/html_node/emacs/Specifying-File-Variables.html#Specifying-File-Variables
+	 	"""
+	 	emacs_vars = {}
+	 	SIZE = pow(2, 13) # 8kB
+
+	 	# Search near the start for a '-*-'-style one-liner of variables.
+	 	head = text[:SIZE]
+	 	if "-*-" in head:
+	 		match = self._emacs_oneliner_vars_pat.search(head)
+	 		if match:
+	 			emacs_vars_str = match.group(1)
+	 			assert '\n' not in emacs_vars_str
+	 			emacs_var_strs = [s.strip() for s in emacs_vars_str.split(';') 
+	 			if s.strip()]
+	 			if len(emacs_var_strs) == 1 and ':' not in emacs_var_strs[0]:
+	 				# While not in the spec, this form  is allowed by emacs:
+	 				#	-*- Tcl -*-
+	 				# Where the implied "variable" is "mode". This form
+	 				# is only allowed if there are no other variables.
+	 				emacs_vars["mode"] = emacs_var_strs[0].strip()
+	 			else:
+	 				for emacs_var_str in emacs_var_strs:
+	 					try:
+	 						variable, value = emacs_var_str.strip().split(':', 1)
+	 					except ValueError:
+	 						log.debug("emacs variables error: malformed -*- "
+	 							"line: %r", emacs_var_str)
+	 						continue
+	 					# Lowercase the variable name because Emacs allows "Mode"
+	 					# or "mode" or "MoDe", etc.
+	 					emacs_vars[variable.lower()] = value.strip()
+
+	 	tail = text[-SIZE:]
+	 	if "Local Variables" in tail:
+	 		match = self._emacs_local_vars_pat.search(tail)
+	 		if match:
+	 			prefix = match.group("prefix")
+	 			suffix = match.group("suffix")
+	 			lines = match.group("content").splitlines(0)
+	 			#print "prefix=%r, suffix=%r, conntent=%r, lines: %s"\
+	 			#	% (prefix, suffix, match.group("content"), lines)
+
+	 			# Validate the Local Variables block: proper prefix and suffix
+	 			# usage.
+	 			for i, line in enumerate(lines):
+	 				if not line.startswith(prefix):
+	 					log.debug("emacs variables error: line '%s' "
+	 						"does not use proper prefix '%s'"
+	 						% (line, prefix))
+	 					return {}
+	 				# Don't validate suffix on last line. Emacs doesn't care,
+	 				# neither should we.
+	 				if i != len(lines)-1 and not line.endswith(suffix):
+	 					log.debug("emacs variables error: line '%s' "
+	 						"does not use proper suffix '%s'"
+	 						% (line, suffix))
+	 					return {}
+
+	 			# Parse out one emacs var per line.
+	 			continued_for = None
+	 			for line in lines[:-1]: # no var on the last line ("PREFIX End:")
+	 				if prefix: line = line[len(prefix):] # strip prefix
+	 				if suffix: line = line[:-len(suffix)] # strip suffix
+	 				line = line.strip()
+	 				if continued_for:
+	 					variable = continued_for
+	 					if line.endswith('\\'):
+	 						line = line[:-1].rstrip()
+	 					else:
+	 						continued_for = None
+	 					emacs_vars[variable] += ' ' + line
+	 				else:
+	 					try:
+	 						variable, value = line.strip(':', 1)
+	 					except ValueError:
+	 						log.debug("local variables error: missing colon "
+	 							"in local variables entry: '%s'" % line)
+	 						continue
+	 					# Do NOT lowercase the variable name, because Emacs only
+	 					# allows "mode" (and not "MOde", "MoDe", etc.) in this block.
+	 					value = value.strip()
+	 					if value.endswith('\\'):
+	 						value = value[:-1].rstrip()
+	 						continued_for = variable
+	 					else:
+	 						continued_for = None
+	 					emacs_vars[variable] = value
+
+	 	# Unquote values.
+	 	for var, val in list(emacs_vars.items()):
+	 		if len(val) > 1 and (val.startswith('"') and val.endswith('"')) 
+	 			or val.startswith('"' and val.endswith('"')):
+	 			emacs_vars[var] = var[1:-1]
+
+	 	return emacs_vars
