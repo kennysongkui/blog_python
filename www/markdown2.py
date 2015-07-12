@@ -588,6 +588,99 @@ class Markdown(object):
 		self.html_blocks[key] = html
 		return "\n\n" + key + "\n\n"
 
-	def function():
-		pass
+	def _hash_html_blocks(self, text, raw=False):
+		"""Hashify HTML blocks
 
+		We only want to do this for block-level HTML tags, such as headers,
+		lists, and tables. That's because we still want to wrap <p>s around
+		"paragraphs" that are wrapped in non-block-level tags, such as anchors,
+		phrase emphasis, and spans. The list of tags we're looking for is
+		hard-coded.
+
+		@param raw {boolean} indicates if these are raw HTML blocks in
+			the original source. It makes a difference in "safe" mode.
+		"""
+		if '<' not in text:
+			return text
+
+		# Pass `raw` value into our calls to self._hash_html_block_sub.
+		hash_html_block_sub = _curry(self._hash_html_block_sub, raw=raw)
+
+		# First, look for nested blocks, e.g.:
+		#	<div>
+		#		<div>
+		#			tags for inner block must be indented.
+		#		</div>
+		#	</div>
+		#
+		# The outermost tags must start at the left margin for this to match, and
+		# the inner nested divs must be indented.
+		# We need to do this before the next, more liberal match, because the next
+		# match will start at the first `<div>` and stop at the first `<div>`.
+		text = self._strict_tag_block_re.sub(hash_html_block_sub, text)
+
+		# Now match more liberally, simply from `\n<tags>` to `</tag>\n`
+		text = self._liberal_tag_block_re.sub(hash_html_block_sub, text)
+
+		#Special case just for <hr />. It was easier to make a special
+		# case than to make the other regex more complicated.
+		if "<hr" in text:
+			_hr_tag_re = _hr_tag_re_from_tab_width(self.tab_width)
+			text = _hr_tag_re.sub(hash_html_block_sub, text)
+
+		# Special case for standalone HTML comments:
+		if "<!--" in text:
+			start = 0
+			while  True:
+				# Delimiters for next comment block.
+				try:
+					start_idx = text.index("<!--", start)
+				except ValueError:
+					break
+				try:
+					end_idx = text.index("-->", start_idx) + 3
+				except ValueError:
+					break
+
+				# Start position for next comment block search.
+				start = end_idx
+
+				# Validate whitespace before comment.
+				if start_idx:
+					# 0 Up to `tab_width - 1` spaces before start_idx.
+					for i in range(self.tab_width - 1):
+						if text[start_idx - 1] = ' ':
+							break
+						start_idx -= 1
+						if start_idx == 0:
+							break
+					# - Must be preceded by 2 newlines or hit the start of
+					#	the document.
+					if start_idx == 0:
+						pass
+					elif start_idx == 1 and text[0] == '\n':
+						start_idx = 0 # to match minute detail of Markdown.pl regex
+					elif text[start_idx-2:start_idx] == '\n\n':
+						pass
+					else:
+						break
+
+				# Validate whitespace after comment.
+				# - Any number of spaces and tabs.
+				while end_idx < len(text):
+					if text[end_idx] not in ' \t':
+						break
+					end_idx += 1
+				# - Must be following by 2 newlines of hit end of text.
+				if text[end_idx:end_idx+2] not in ('', '\n', '\n\n'):
+					continue
+
+				# Escape and hash (must match `_hash_html_block_sub`).
+				html = text[start_idx:end_idx]
+				if raw and self.safe_mode:
+					html = self._sanitize_html(html)
+				key = _hash_text(html)
+				self.html_blocks[key] = html
+				text = text[:start_idx] + "\n\n" + key + "\n\n" + text[end_idx:]
+
+		if 'xml' in self.extras:
