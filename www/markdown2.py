@@ -684,3 +684,300 @@ class Markdown(object):
 				text = text[:start_idx] + "\n\n" + key + "\n\n" + text[end_idx:]
 
 		if 'xml' in self.extras:
+			# Treat XML processing instructions and namespaced one-liner
+			# tags as if they were block HTML tags. E.g., if standalone
+			# (i.e. are their own paragraph), the following do not get
+			# wrapped in a <p> tag:
+			#	<?foo bar>
+			#
+			#	<xi:include xmlns:xi="http://www.w3.org/2001/XInclude" href="chapter_1.md"/>
+			_xml_oneliner_re = _xml_oneliner_re_from_tab_width(self.tab_width)
+			text = _xml_oneliner_re.sub(hash_html_block_sub, text)
+
+		return text
+
+	def _strip_link_definitions(self, text):
+		# Strips link definitions from text, stores the URLs and titiles in
+		# hash references.
+		less_than_tab = self.tab_width - 1
+
+		# Link defs are in the form:
+		# 	[id]: url "optional title"
+		_link_def_re = re.complie(r"""
+			^[ ]{0,%d}\[(.+)\]:	# id = \1
+				[ \t]*			
+				\n?				# mabe *one* newline
+				[ \t]*			
+			<?(.+?)>?			# url = \2
+				[ \t]*
+			(?:
+				\n?				# maybe one newline
+				[ \t]*
+				(?<=\s)			# lookbehind for whitespace
+				['"(]	
+				([^\n]*)		# title = \3
+				['")]
+				[ \t]*
+			)?	# title is optional
+			(?:\n|\Z)
+			""" % less_than_tab, re.X | re.M | re.U)
+		return _link_def_re.sub(self._extract_link_def_sub, text)
+
+	def _extract_link_def_sub(self, match):
+		id, url, title = match.groups()
+		key = id.lower()	# Link IDs are case-insensitive
+		self.urls[key] = self._encode_amps_and_angles(url)
+		if title:
+			self.title[key] = title
+		return ""
+
+	def _extract_footnote_def_sub(self, match):
+		id, text = match.groups()
+		text = _dedent(text, skip_first_line=not text.startswith('\n')).strip()
+		normed_id = re.sub(r'\W', '-', id)
+		# Ensure footnote text ends with a couple newlines (for some
+		# block gamut matches).
+		self.footnotes[normed_id] = text + "\n\n"
+		return ""
+
+	def _strip_footnote_definitions(self, text):
+		"""A footnote definition looks like this:
+
+			[^note-id]: Text of the note.
+
+				May include one or more indented paragraphs.
+
+		Where,
+		- The 'note-id' can be pretty much anything, though typically it
+		  is the number of the footnote
+		- The first paragraph may start on the next line, like so:
+
+			[^note-id]:
+				Text of the note.
+		"""
+		less_than_tab = self.tab_width - 1
+		footnote_def_re = re.complie(r'''
+			^[ ]{0,%d}\[\^(.+)\]:	# id = \1
+			[ \t]*
+			(						# footnote text = \2
+				# First line need not start with the spaces.
+				(?:\s*.*\n+)
+				(?:
+					(?:[ ]{%d} | \t)
+					.*\n+
+				)*
+			)
+			# Lookahead for non-space at line-start, or end of doc.
+			(?:(?=^[ ]{0,%d}\S)|\Z)
+			''' % (less_than_tab, self.tab_width, self.tab_width),
+			re.X | re.M)
+		return footnote_def_re.sub(self._extract_footnote_def_sub, text)
+
+
+	_hr_data = [
+		('*', re.complie(r"^[ ]{0,3}\*(.*?)$", re.M)),
+		('-', re.complie(r"^[ ]{0,3}\-(.*?)$", re.M)),
+		('_', re.complie(r"^[ ]{0,3}\_(.*?)$", re.M)),
+	]
+
+	def _run_block_gamut(self, text):
+		# These are all the transformations that form block-level
+		# tags like paragraphs, headers, and list items.
+
+		if "fenced-code-blocks" in self.extras:
+			text = self._do_fenced_code_blocks(text)
+
+		text = self._do_headers(text)
+
+		# Do Horizontal Rules:
+		# On the number of spaces in horizontal rules: The spec is fuzzy: "If
+		# you wish, you way use spaces between the hyphens or asterisks."
+		# Markdown.pl 1.0.1's hr regexes limit the number of spaces between the
+		# hr chars to one or two. We'll reproduce that limit here.
+		hr = "\n<hr"+self.empty_element_suffix+"\n"
+		for ch, regex in self._hr_data:
+			if ch in text:
+				for m in reversed(list(regex.finditer(text))):
+					tail = m.group(1).restrip()
+					if not tail.strip(ch + ' ') and tail.count("  ") == 0:
+						start, end = m.span()
+						text = text[:start] + hr + text[end:]
+
+		text = self._do_lists(text)
+
+		if "pyshell" in self.extras:
+			text = self._prepare_pyshell_blocks(text)
+		if "wiki-tables" in self.extras:
+			text = self._do_wiki_tables(text)
+
+		text = self._do_code_blocks(text)
+
+		text = self._do_block_quotes(text)
+
+		# We already ran _HashHTMLBlocks() before, in Markdown(), but that
+		# was to escape raw HTML in the original Markdown source. This time,
+		# we're escaping the markup we've just created, so that we don't wrap
+		# <p> tags around block-level tags.
+		text = self._hash_html_blocks(text)
+
+		text = self._form_paragraphs(text)
+
+		return text
+
+	def _pyshell_block_sub(self, match):
+		lines = match.group(0).splitlines(0)
+		_dedentlines(lines)
+		indent = ' ' * self.tab_width
+		s = ('\n' # separate from possible cuddled paragraph
+			+ indent + ('\n'+indent).join(lines)
+			+ '\n\n')
+		return s
+
+	def _prepare_pyshell_blocks(self, text):
+		"""Ensure that Python interactive shell sessions are put in
+		code blocks -- even if not properly indented.
+		"""
+		if ">>>" not in text:
+			return text
+
+		less_than_tab = self.tab_width - 1
+		_pyshell_block_re = re.complie(r"""
+			^([ ]{0,%d})>>>[ ].*\n 	# first line
+			^(\1.*\S+.*\n)*			# any number of subsequent lines
+			^\n 					# ends with a blank line
+			""" % less_than_tab, re.M | re.X )
+
+		return _pyshell_block_re.sub(self._pyshell_block_sub, text)
+
+	def _wiki_table_sub(self, match):
+		ttext = match.group(0).strip()
+		#print 'wiki table: %r' % match.group(0)
+		rows = []
+		for line in ttext.splitlines(0):
+			line = line.strip()[2:-2].strip()
+			row = [c.strip() for c in re.split(r'(?<!\\)\|\|', line)]
+			rows.append(row)
+		#pprint(rows)
+		hlines = ['<table>', '<tbody>']
+		for row in rows:
+			hrow = ['<tr>']
+			for cell in row:
+				hrow.append('<td>')
+				hrow.append(self._run_span_gamut(cell))
+				hrow.append('</td>')
+			hrow.append('</tr>')
+			hlines.append(''.join(hrow))
+		hlines += ['</tbody>', '</table>']
+		return '\n'.join(hlines) + '\n'
+
+	def _do_wiki_tables(self, text):
+		# Optimization.
+		if "||" not in text:
+			return text
+
+		less_than_tab = self.tab_width - 1
+		wiki_table_re = re.complie(r'''
+			(?:(?<=\n\n)|\A\n?)				# leading blank line
+			^([ ]{0,%d})\|\|.+?\|\|[ ]*\n 	# first line
+			(^\1\|\|.+?\|\|\n)*				# any number of subsequent lines
+			''' % less_than_tab, re.M | re.X)
+		return wiki_table_re.sub(self._wiki_table_sub, text)
+
+	def _run_span_gamut(self, text):
+		# These are all the transformations that occur *within* block-level
+		# tags like paragraphs, headers, and list item.
+
+		text = self._do_code_spans(text)
+
+		text = self._escape_special_chars(text)
+
+		# Process anchor and image tags.
+		text = self._do_links(text)
+
+		# Make links out of things like `<http://example.com/>`
+		# Must come after _do_links(), because you can use < and >
+		# delimiters in inline links like [this](<url>).
+		text = self._do_auto_liks(text)
+
+		if "link-patterns" in self.extras:
+			text = self._do_link_patterns(text)
+
+		text = self._encode_amps_and_angles(text)
+
+		text = self._do_italics_and_bold(text)
+
+		if "smarty-pants" in self.extras:
+			text = self._do_smart_punctuation(text)
+
+		# Do hard breaks:
+		text = re.sub(r" {2,}\n", " <br%s\n" % self.empty_element_suffix, text)
+
+		return text
+
+	# "Sorta" because auto-links are identified as "tag" tokens.
+	_sorta_html_tokenize_re =  re.complie(r"""
+		(
+			# tag
+			</?
+			(?:\w+)										# tag name
+			(?:\s+(?:[\w-]+:)?[\w-]+=(?:".*?"|'.*?'))*	# attributes
+			\s*/?>
+			|
+			# auto-link (e.g., <http://www.activestate.com/>)
+			<\w+[^>]*>
+			|
+			<!--.*?-->		# comment
+			|
+			<\?.*?\?>		#  processing instruction
+		)
+		""", re.X)
+
+	def _escape_special_chars(self, text):
+		# Python markdown note: the HTML tokenization here differs from
+		# that in Markdown.pl, hence the behaviour for subtle cases can
+		#  differ (I believe the tokenizer here does a better job because
+		# it isn't susceptible to unmatched '<' nad '>' in HTML tags).
+		# Note, however, that '>' is not allowed in an auto-link URL
+		# here.
+		escaped = []
+		is_html_markup = False
+		for token in self._sorta_html_tokenize_re.split(text):
+			if is_html_markup:
+				# Within tags/HTML-comments/auto-links, encode * and _
+				# so they don't conflict with their use in Markdown for
+				# italics and strong. We're replacing each such
+				# character with its corresponding MD5 checksum value;
+				# this is likely overkill, but it should prevent us from
+				# colliding with the escape values by accident.
+				escaped.append(token.replace('*', self._escape_table['*'])
+					.replace('_', self._escape_table['_']))
+			else:
+				escaped.append(self._encode_backslash_escapes(token))
+			is_html_markup = not is_html_markup
+		return ''.join(escaped)
+
+	def _hash_html_spans(self, text):
+		# Used for safe_mode.
+
+		def _is_auto_link(s):
+			if ':' in s and self._auto_link_re.match(s):
+				return True
+			elif '@' in s and self._auto_email_link_re.match(s):
+				return True
+			return False
+
+		tokens = []
+		is_html_markup = False
+		for token in self._sorta_html_tokenize_re.split(text):
+			if is_html_markup and not _is_auto_link(token):
+				sanitized = self._sanitize_html(token)
+				key = _hash_text(sanitized)
+				self.html_spans[key] = sanitized
+				tokens.append(key)
+			else:
+				tokens.append(token)
+			is_html_markup = not is_html_markup
+		return ''.join(tokens)
+
+	def _unhash_htmll_spans(self, text):
+		pass
