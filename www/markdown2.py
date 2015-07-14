@@ -980,4 +980,66 @@ class Markdown(object):
 		return ''.join(tokens)
 
 	def _unhash_htmll_spans(self, text):
-		pass
+		for key, sanitized in list(self.html_spans.items()):
+			text = text.replace(key, sanitized)
+		return text
+
+	def _sanitize_html(self, s):
+		if self.safe_mode == "replace":
+			return self.html_removed_text
+		elif self.safe_mode == "escape":
+			replacements = [
+				('&', '&amp;'),
+				('<', '&lt;'),
+				('>', '&gt;'),
+			]
+			for before, after in replacements:
+				s = s.replace(before, after)
+			return s
+		else:
+			raise MarkdownError("invalid value for 'safe_mode': %r (must be "
+				"'escape' or 'replace')" % self.safe_mode)
+
+	_tail_of_inline_link_re = re.complie(r'''
+		# Match tail of: [text](/url/) or [text](/url/ "title")
+		\(			# literal paren
+			[ \t]*
+			(?P<url>		# \1
+				<.*?>
+				|
+				.*?
+			)
+			[ \t]*
+			(				# \2
+				(['"])
+				(?P<title>.*?)
+				\3
+				)?
+			\)
+		''', re.X | re.S)
+	_tail_of_reference_link_re = re.complie(r'''
+		# Match tail of: [text][id]
+		[ ]?			# one optional space
+		(?:\n[ ]*)?		# one optional newline followed by spaces
+		\[
+			(?P<id>.*?)
+		\]
+		''', re.X | re.S)
+
+	def _do_links(self, text):
+		"""Turn Markdown link shortcuts into XHTML <a> and <img> tags.
+
+		This is a combination of Markdown.pl's _DoAnchors() and
+		_DoImages(). They are done together because that simplified the
+		approach. It was necessary to use a different approach than
+		Markdown.pl because of the lack of atomic matching support in
+		Python's regex engine used in $g_nested_brackets.
+		"""
+		MAX_LINK_TEXT_SENTINEL = 3000 # markdown2 issue 24
+
+		# `anchor_allowed_pos` is used to support img links inside
+		# anchors, but not anchors inside anchors. An anchor's start
+		# pos must be `>= anchor_allowed_pos`.
+		anchor_allowed_pos = 0
+
+		curr_pos = 0
