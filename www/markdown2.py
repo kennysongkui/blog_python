@@ -1043,3 +1043,91 @@ class Markdown(object):
 		anchor_allowed_pos = 0
 
 		curr_pos = 0
+		while True: # Handle the next link:
+			# The next '[' is the start of:
+			# - an inline anchor: 	[text](url "title")
+			# - a reference anchor: [text][id]
+			# - an inline img:		![text](url "title")
+			# - a reference img: 	![text][id]
+			# - a footnote ref: 	[^id]
+			# 	(Only if 'footnotes' extra enabled)
+			# - a footnote defn: 	[^id]: ...
+			#	(Only if 'footnotes' extra enabled) These have already
+			#	been stripped in _strip_footnote_definitions() so no
+			#	need to watch for them.
+			# - a linke definition: [id]: url "title"
+			#	These have already been stripped in
+			#	_strip_link_definitions() so no need to watch for them.
+			# - not markup:			[...anything else...
+			try:
+				start_idx = text.index('[', curr_pos)
+			except ValueError:
+				break
+			text_length = len(text)
+
+			# Find the matching closing ']'.
+			# Markdown.pl allows *matching* brackets in link text so we
+			# will here too. Markdown.pl *doesn't* currently allow
+			# matching brackets in img alt text -- we'll differ in that
+			# regard.
+			bracket_depth = 0
+			for p in range(start_idx+1, min(start_idx+MAX_LINK_TEXT_SENTINEL, 
+					text_length)):
+				ch = text[p]
+				if ch == ']':
+					bracket_depth -= 1
+					if bracket_depth < 0:
+						break
+				elif ch == '[':
+					bracket_depth += 1
+			else:
+				# Closing bracket not found within sentinel length.
+				# This isn't markup.
+				curr_pos = start_idx + 1
+				continue
+			link_text = text[start_idx+1:p]
+
+			# Possibly a footnote ref?
+			if "footnotes" in self.extras and link_text.startswith("^"):
+				normed_id = re.sub(r'\W', '-', link_text[1:])
+				if normed_id in self.footnotes:
+					self.footnote_ids.append(normed_id)
+					result = '<sup class="footnote-ref" id="fnref-%s">' \
+							'<a href="#fn-%s">%s</a></sup>' \
+							% (normed_id, normed_id, len(self.footnote_ids))
+					text = text[:start_idx] + result + text[p+1:]
+				else:
+					# This id isn't defined, leave the markup alone.
+					curr_pos = p+1
+				continue
+
+			# Now determine what this is by the remainder.
+			p += 1
+			if p == text_length:
+				return text
+
+			# Inline anchor or img?
+			if text[p] == '(': # attempt at perf improvement
+				match = self._tail_of_inline_link_re.match(text, p)
+				if match:
+					# Handle an inline anchor or img.
+					is_img = start_idx > 0 and text[start_idx] == "!"
+					if is_img:
+						start_idx -= 1
+
+					url, title = match.group("urls"), match.group("title")
+					if url and url[0] == '<':
+						url = url[1:-1] # '<url>' -> 'url'
+					# We've got to encode these to avoid conflicting
+					# with italics/bold.
+					url = url.replace('*', self._escape_table['*']) \
+							.replace('_', self._escape_table['_'])
+					if title:
+						title_str = ' title="%s"' % (
+							_xml_escape_attr(title)
+								.replace('*', self._escape_table['*']) \
+								.replace('_', self._escape_table['_']))
+					else:
+						title_str = ''
+					if is_img:
+						result = 
